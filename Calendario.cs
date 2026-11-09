@@ -250,7 +250,8 @@ class Store
         return r.Length > 60 ? r.Substring(0, 60) : r;
     }
 
-    static bool ValidStatus(string st) { return st == "presente" || st == "assente"; }
+    public const string Removed = "rimosso"; // scelta cancellata (resta registrata per la sincronizzazione)
+    static bool ValidStatus(string st) { return st == "presente" || st == "assente" || st == Removed; }
     static bool ValidUserStatus(string st) { return st == Approved || st == Pending || st == Rejected; }
 
     public static long Now() { return (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds; }
@@ -306,6 +307,7 @@ class Store
         foreach (string d in MasterConflicts().Keys) if (string.CompareOrdinal(d, today) >= 0) n++;
         return n;
     }
+
     public void EnsureOne() { if (Campaigns.Count == 0) AddCampaign(DefaultCampaign, 0); EnsureUsers(); }
 
     public Dictionary<string, Dictionary<string, Entry>> Get(string campaign)
@@ -889,7 +891,7 @@ class MainForm : Form
         for (int i = 0; i < 42; i++)
         {
             DayCell c = new DayCell { Bounds = new Rectangle(left + (i % 7) * cw + 1, top + 28 + (i / 7) * ch + 1, cw - 2, ch - 2) };
-            c.Click += OnCellClick;
+            c.MouseUp += OnCellMouseUp;
             cells[i] = c;
             calendarPanel.Controls.Add(c);
         }
@@ -914,6 +916,8 @@ class MainForm : Form
         absent.Click += delegate { SaveStatus("assente"); };
         statusMenu.Items.Add(present);
         statusMenu.Items.Add(absent);
+        statusMenu.Items.Add(new ToolStripSeparator());
+        statusMenu.Items.Add("Cancella  (tasto destro)", null, delegate { if (selectedDate != null) ClearStatus(selectedDate); });
 
         manageMenu = new ContextMenuStrip { ShowImageMargin = false, Font = new Font("Segoe UI", 10f) };
         manageMenu.Items.Add("Giocatori e richieste...", null, delegate { UsersDialog(); });
@@ -1531,13 +1535,33 @@ class MainForm : Form
         RenderCalendar();
     }
 
-    void OnCellClick(object sender, EventArgs e)
+    void OnCellMouseUp(object sender, MouseEventArgs e)
     {
         DayCell c = (DayCell)sender;
         if (c.DateKey == null || loggedInUser == null) return;
+        if (e.Button == MouseButtons.Right) { ClearStatus(c.DateKey); return; }
+        if (e.Button != MouseButtons.Left) return;
         selectedDate = c.DateKey;
         Point p = new Point(c.Width / 2 - statusMenu.Width / 2, -statusMenu.Height - 4);
         statusMenu.Show(c, p);
+    }
+
+    // Tasto destro: cancella "Ci sono"/"Manco" dell'utente per quel giorno nella campagna corrente
+    void ClearStatus(string date)
+    {
+        string campaign = currentCampaign;
+        LoadData();
+        currentCampaign = store.Find(campaign) ?? campaign;
+        Dictionary<string, Entry> mine;
+        Entry e;
+        if (!data.TryGetValue(loggedInUser, out mine) || !mine.TryGetValue(date, out e) || e.Status == Store.Removed)
+        {
+            SetStatus("Nessuna scelta da cancellare il " + FormatDate(date) + ".");
+            return;
+        }
+        store.Set(currentCampaign, loggedInUser, date, Store.Removed, Store.Now());
+        AfterChange(loggedInUser + ": " + date + " cancellato [" + currentCampaign + "]");
+        SetStatus("Cancellato \"" + (e.Status == "presente" ? "Ci sono" : "Manco") + "\" del " + FormatDate(date) + ".");
     }
 
     void SaveStatus(string status)
