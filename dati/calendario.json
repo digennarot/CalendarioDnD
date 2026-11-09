@@ -33,5 +33,9 @@
         "2026-11-12": { "stato": "presente", "t": 1794228018619 }
       }
     }
-  }
+  },
+  "utenti": {
+    "Fabio": { "stato": "approvato", "t": 0 }
+  },
+  "master": { "hash": "pbkdf2:100000:spLfNSQb643eLVduO7As+gF1t+OrJpqTlZgAk69UZ80=", "sale": "Lq1tNAgOw4ELu/VTbfys2w==", "t": 1794234209231 }
 }
