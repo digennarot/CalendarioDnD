@@ -10,6 +10,7 @@ Programma nativo per Windows (WinForms, .NET Framework 4, già incluso in Window
 - I nuovi giocatori chiedono la registrazione; il **Master** la approva o la rifiuta (Gestisci → Giocatori e richieste).
 - Il Master entra con una password, scelta al primo accesso e sincronizzata su tutti i PC; può creare, rinominare ed eliminare le campagne e importare dati.
 - Più campagne, ognuna con le sue presenze.
+- **Conflitti di sessione del Master:** il Master è uno solo, quindi non può essere "Ci sono" in due campagne lo stesso giorno. L'app avvisa quando succede (con l'opzione di spostare la sessione), evidenzia in rosso i giorni in conflitto e in Gestisci → Verifica conflitti di sessione li elenca e permette di risolverli.
 - Clic su un giorno → "Ci sono" / "Manco". Passando il mouse su un giorno si vedono i nomi.
 - Menu **Dati**: esporta/importa JSON (unione o sostituzione; accetta anche i dati del vecchio `Calendario.html`).
 - Sincronizzazione tra più PC tramite questo repository GitHub: i dati vengono salvati in `dati/calendario.json`; per ogni giorno vince la modifica più recente, e le campagne eliminate/rinominate si propagano.
