@@ -17,6 +17,10 @@
         "2026-11-10": { "stato": "presente", "t": 1794225351043 }
       }
     },
-    "Historia": {}
+    "Historia": {
+      "Master": {
+        "2026-11-13": { "stato": "presente", "t": 1794225571233 }
+      }
+    }
   }
 }
