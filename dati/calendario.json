@@ -2,7 +2,8 @@
   "versione": 2,
   "campagne": [
     { "nome": "Campagna principale", "creata": 0 },
-    { "nome": "cotMimic", "creata": 1794225346304 }
+    { "nome": "cotMimic", "creata": 1794225346304 },
+    { "nome": "Historia", "creata": 1794225566337 }
   ],
   "eliminate": {},
   "presenze": {
@@ -15,6 +16,7 @@
       "Master": {
         "2026-11-10": { "stato": "presente", "t": 1794225351043 }
       }
-    }
+    },
+    "Historia": {}
   }
 }
