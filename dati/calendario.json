@@ -8,6 +8,9 @@
   "eliminate": {},
   "presenze": {
     "Campagna principale": {
+      "Fabio": {
+        "2026-11-09": { "stato": "presente", "t": 1794225901588 }
+      },
       "Master": {
         "2026-11-09": { "stato": "presente", "t": 1794225550740 }
       }
