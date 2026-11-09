@@ -6,7 +6,11 @@
   ],
   "eliminate": {},
   "presenze": {
-    "Campagna principale": {},
+    "Campagna principale": {
+      "Master": {
+        "2026-11-09": { "stato": "presente", "t": 1794225550740 }
+      }
+    },
     "cotMimic": {
       "Master": {
         "2026-11-10": { "stato": "presente", "t": 1794225351043 }
