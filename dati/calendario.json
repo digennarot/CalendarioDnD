@@ -1,0 +1,37 @@
+{
+  "versione": 2,
+  "campagne": [
+    { "nome": "Campagna principale", "creata": 0 },
+    { "nome": "cotMimic", "creata": 1794225346304 },
+    { "nome": "Historia", "creata": 1794225566337 },
+    { "nome": "CotN", "creata": 1794228013366 }
+  ],
+  "eliminate": {},
+  "presenze": {
+    "Campagna principale": {
+      "Fabio": {
+        "2026-11-09": { "stato": "presente", "t": 1794225901588 }
+      },
+      "Master": {
+        "2026-11-09": { "stato": "presente", "t": 1794225550740 }
+      }
+    },
+    "cotMimic": {
+      "Master": {
+        "2026-11-10": { "stato": "presente", "t": 1794225351043 },
+        "2026-11-12": { "stato": "presente", "t": 1794225641395 },
+        "2026-11-19": { "stato": "presente", "t": 1794225644020 }
+      }
+    },
+    "Historia": {
+      "Master": {
+        "2026-11-13": { "stato": "presente", "t": 1794225571233 }
+      }
+    },
+    "CotN": {
+      "Master": {
+        "2026-11-12": { "stato": "presente", "t": 1794228018619 }
+      }
+    }
+  }
+}

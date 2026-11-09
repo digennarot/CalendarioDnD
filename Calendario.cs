@@ -270,6 +270,42 @@ class Store
         if (!Data.ContainsKey(name)) Data[name] = new Dictionary<string, Dictionary<string, Entry>>();
     }
 
+    public const string MasterUser = "Master";
+
+    // Sessioni del Master: giorni in cui il Master è "presente" in una campagna -> elenco campagne
+    public SortedDictionary<string, List<string>> MasterSessions()
+    {
+        SortedDictionary<string, List<string>> r = new SortedDictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (string c in Campaigns)
+            foreach (KeyValuePair<string, Dictionary<string, Entry>> u in Get(c))
+            {
+                if (!CI.Equals(u.Key, MasterUser)) continue;
+                foreach (KeyValuePair<string, Entry> d in u.Value)
+                {
+                    if (d.Value.Status != "presente") continue;
+                    if (!r.ContainsKey(d.Key)) r[d.Key] = new List<string>();
+                    if (!r[d.Key].Contains(c)) r[d.Key].Add(c);
+                }
+            }
+        return r;
+    }
+
+    // Conflitti: giorni in cui il Master risulta in sessione in più campagne (il Master è uno solo)
+    public SortedDictionary<string, List<string>> MasterConflicts()
+    {
+        SortedDictionary<string, List<string>> r = new SortedDictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (KeyValuePair<string, List<string>> kv in MasterSessions()) if (kv.Value.Count > 1) r[kv.Key] = kv.Value;
+        return r;
+    }
+
+    public static string Today() { return DateTime.Today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture); }
+
+    public int UpcomingConflicts()
+    {
+        int n = 0; string today = Today();
+        foreach (string d in MasterConflicts().Keys) if (string.CompareOrdinal(d, today) >= 0) n++;
+        return n;
+    }
     public void EnsureOne() { if (Campaigns.Count == 0) AddCampaign(DefaultCampaign, 0); EnsureUsers(); }
 
     public Dictionary<string, Dictionary<string, Entry>> Get(string campaign)
@@ -881,6 +917,7 @@ class MainForm : Form
 
         manageMenu = new ContextMenuStrip { ShowImageMargin = false, Font = new Font("Segoe UI", 10f) };
         manageMenu.Items.Add("Giocatori e richieste...", null, delegate { UsersDialog(); });
+        manageMenu.Items.Add("Verifica conflitti di sessione...", null, delegate { ConflictsDialog(); });
         manageMenu.Items.Add("Cambia password del Master...", null, delegate { ChangeMasterPassword(); });
         manageMenu.Items.Add(new ToolStripSeparator());
         manageMenu.Items.Add("Nuova campagna...", null, delegate { NewCampaign(); });
@@ -1344,9 +1381,119 @@ class MainForm : Form
         UpdateManageButton();
     }
 
+    static string FormatDate(string key)
+    {
+        DateTime d;
+        if (!DateTime.TryParseExact(key, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out d)) return key;
+        return d.ToString("dddd d MMMM yyyy", new CultureInfo("it-IT"));
+    }
+
+    void ConflictsDialog()
+    {
+        using (Form f = new Form())
+        {
+            f.Text = "Conflitti di sessione del Master";
+            f.Font = new Font("Segoe UI", 10f);
+            f.FormBorderStyle = FormBorderStyle.FixedDialog;
+            f.MinimizeBox = false; f.MaximizeBox = false; f.ShowInTaskbar = false;
+            f.StartPosition = FormStartPosition.CenterParent;
+            f.ClientSize = new Size(520, 400);
+
+            Label info = new Label { Bounds = new Rectangle(12, 10, 496, 40), ForeColor = Color.DimGray, Font = new Font("Segoe UI", 9f),
+                Text = "Giorni in cui il Master risulta \"Ci sono\" in più campagne. Il Master è uno solo: per ogni giorno scegli quale campagna tiene la sessione." };
+            ListView list = new ListView { Bounds = new Rectangle(12, 54, 496, 260), View = View.Details, FullRowSelect = true,
+                MultiSelect = false, HideSelection = false };
+            list.Columns.Add("Giorno", 190);
+            list.Columns.Add("Campagne in conflitto", 300);
+            CheckBox past = new CheckBox { Text = "Mostra anche i giorni passati", Bounds = new Rectangle(12, 320, 300, 24) };
+            Label summary = new Label { Bounds = new Rectangle(12, 346, 496, 20), ForeColor = Color.DimGray, Font = new Font("Segoe UI", 9f) };
+            Button resolve = new Button { Text = "Risolvi...", Bounds = new Rectangle(12, 368, 100, 30) };
+            Button go = new Button { Text = "Vai al giorno", Bounds = new Rectangle(118, 368, 110, 30) };
+            Button close = new Button { Text = "Chiudi", DialogResult = DialogResult.Cancel, Bounds = new Rectangle(423, 368, 85, 30) };
+
+            Action fill = delegate
+            {
+                list.Items.Clear();
+                string today = Store.Today();
+                int shown = 0;
+                foreach (KeyValuePair<string, List<string>> kv in store.MasterConflicts())
+                {
+                    if (!past.Checked && string.CompareOrdinal(kv.Key, today) < 0) continue;
+                    ListViewItem it = new ListViewItem(FormatDate(kv.Key));
+                    it.SubItems.Add(string.Join(", ", kv.Value.ToArray()));
+                    it.Tag = kv.Key;
+                    if (string.CompareOrdinal(kv.Key, today) < 0) it.ForeColor = Color.Gray;
+                    list.Items.Add(it);
+                    shown++;
+                }
+                summary.Text = shown == 0 ? "\u2714 Nessun conflitto" + (past.Checked ? "." : " nei prossimi giorni.") : (shown == 1 ? "1 giorno in conflitto." : shown + " giorni in conflitto.");
+                summary.ForeColor = shown == 0 ? Green : Red;
+                resolve.Enabled = go.Enabled = shown > 0;
+                if (shown > 0) list.Items[0].Selected = true;
+            };
+            past.CheckedChanged += delegate { fill(); };
+
+            Action goTo = delegate
+            {
+                if (list.SelectedItems.Count == 0) return;
+                DateTime d = DateTime.ParseExact((string)list.SelectedItems[0].Tag, "yyyy-MM-dd", CultureInfo.InvariantCulture);
+                year = d.Year; month = d.Month;
+                RenderCalendar();
+                f.Close();
+            };
+            go.Click += delegate { goTo(); };
+            list.DoubleClick += delegate { goTo(); };
+
+            resolve.Click += delegate
+            {
+                if (list.SelectedItems.Count == 0) return;
+                string date = (string)list.SelectedItems[0].Tag;
+                List<string> camps;
+                if (!store.MasterConflicts().TryGetValue(date, out camps)) { fill(); return; }
+                string keep = ChooseCampaign("Risolvi conflitto", "Il " + FormatDate(date) + "\nquale campagna tiene la sessione?", camps);
+                if (keep == null) return;
+                LoadData();
+                long now = Store.Now();
+                List<string> current;
+                if (store.MasterSessions().TryGetValue(date, out current))
+                    foreach (string c in current)
+                        if (!string.Equals(c, keep, StringComparison.OrdinalIgnoreCase)) store.Set(c, Store.MasterUser, date, "assente", now);
+                AfterChange("Conflitto del " + date + " risolto: sessione a " + keep);
+                fill();
+            };
+
+            f.Controls.AddRange(new Control[] { info, list, past, summary, resolve, go, close });
+            f.CancelButton = close;
+            fill();
+            f.ShowDialog(this);
+        }
+    }
+
+    string ChooseCampaign(string title, string prompt, List<string> options)
+    {
+        using (Form f = new Form())
+        {
+            f.Text = title;
+            f.Font = new Font("Segoe UI", 10f);
+            f.FormBorderStyle = FormBorderStyle.FixedDialog;
+            f.MinimizeBox = false; f.MaximizeBox = false; f.ShowInTaskbar = false;
+            f.StartPosition = FormStartPosition.CenterParent;
+            f.ClientSize = new Size(340, 150);
+            Label l = new Label { Text = prompt, Bounds = new Rectangle(12, 10, 316, 44) };
+            ComboBox cb = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Bounds = new Rectangle(12, 60, 316, 28) };
+            foreach (string o in options) cb.Items.Add(o);
+            cb.SelectedIndex = 0;
+            Button ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Bounds = new Rectangle(152, 106, 85, 32) };
+            Button cancel = new Button { Text = "Annulla", DialogResult = DialogResult.Cancel, Bounds = new Rectangle(243, 106, 85, 32) };
+            f.Controls.AddRange(new Control[] { l, cb, ok, cancel });
+            f.AcceptButton = ok; f.CancelButton = cancel;
+            return f.ShowDialog(this) == DialogResult.OK ? (string)cb.SelectedItem : null;
+        }
+    }
+
     void UpdateManageButton()
     {
-        int n = store.UsersWithStatus(Store.Pending).Count;
+        int n = store.UsersWithStatus(Store.Pending).Count + store.UpcomingConflicts();
         manageBtn.Text = n > 0 ? "Gestisci (" + n + ") ▾" : "Gestisci ▾";
         manageBtn.ForeColor = n > 0 ? Red : Blue;
         manageBtn.FlatAppearance.BorderColor = manageBtn.ForeColor;
@@ -1399,8 +1546,34 @@ class MainForm : Form
         string campaign = currentCampaign;
         LoadData(); // non sovrascrivere modifiche fatte da altri nel frattempo
         currentCampaign = store.Find(campaign) ?? campaign;
-        store.Set(currentCampaign, loggedInUser, selectedDate, status, Store.Now());
-        AfterChange(loggedInUser + ": " + selectedDate + " " + status + " [" + currentCampaign + "]");
+
+        List<string> moveFrom = new List<string>();
+        if (IsMaster && status == "presente")
+        {
+            List<string> others;
+            if (store.MasterSessions().TryGetValue(selectedDate, out others))
+            {
+                others = others.FindAll(delegate(string c) { return !string.Equals(c, currentCampaign, StringComparison.OrdinalIgnoreCase); });
+                if (others.Count > 0)
+                {
+                    DialogResult r = MessageBox.Show(
+                        "Il " + FormatDate(selectedDate) + " hai già una sessione di: " + string.Join(", ", others.ToArray()) + ".\n" +
+                        "Il Master non può condurre due sessioni lo stesso giorno.\n\n" +
+                        "Sì = sposta la sessione su \"" + currentCampaign + "\" (segna assente nelle altre)\n" +
+                        "No = segna comunque (resterà un conflitto da risolvere)\n" +
+                        "Annulla = non fare nulla",
+                        "Conflitto di sessione", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Warning);
+                    if (r == DialogResult.Cancel) return;
+                    if (r == DialogResult.Yes) moveFrom = others;
+                }
+            }
+        }
+
+        long now = Store.Now();
+        store.Set(currentCampaign, loggedInUser, selectedDate, status, now);
+        foreach (string c in moveFrom) store.Set(c, loggedInUser, selectedDate, "assente", now);
+        AfterChange(loggedInUser + ": " + selectedDate + " " + status + " [" + currentCampaign + "]" +
+            (moveFrom.Count > 0 ? " (sessione spostata da " + string.Join(", ", moveFrom.ToArray()) + ")" : ""));
     }
 
     void RenderCalendar()
@@ -1411,6 +1584,7 @@ class MainForm : Form
         int days = DateTime.DaysInMonth(year, month);
         DateTime today = DateTime.Today;
         Dictionary<string, Dictionary<string, Entry>> d = data;
+        SortedDictionary<string, List<string>> conflicts = IsMaster ? store.MasterConflicts() : new SortedDictionary<string, List<string>>();
 
         for (int i = 0; i < 42; i++)
         {
@@ -1419,7 +1593,7 @@ class MainForm : Form
             if (day < 1 || day > days)
             {
                 c.DateKey = null; c.Day = 0; c.Present = c.Absent = 0;
-                c.MineStatus = null; c.IsToday = false;
+                c.MineStatus = null; c.IsToday = false; c.Conflict = false;
                 c.Cursor = Cursors.Default;
                 tip.SetToolTip(c, null);
                 c.Invalidate();
@@ -1451,6 +1625,10 @@ class MainForm : Form
                 if (pres.Count > 0) t += "Presenti: " + string.Join(", ", pres.ToArray());
                 if (abs.Count > 0) t += (t.Length > 0 ? "\n" : "") + "Assenti: " + string.Join(", ", abs.ToArray());
             }
+            List<string> conf;
+            c.Conflict = conflicts.TryGetValue(key, out conf);
+            if (c.Conflict)
+                t = (t == null ? "" : t + "\n") + "\u26A0 Conflitto: sessioni di " + string.Join(", ", conf.ToArray());
             tip.SetToolTip(c, t);
             c.Invalidate();
         }
@@ -1464,6 +1642,7 @@ class MainForm : Form
         public bool IsToday;
         public int Present, Absent;
         public string MineStatus;
+        public bool Conflict;
         bool hover;
 
         public DayCell()
@@ -1495,6 +1674,15 @@ class MainForm : Form
             {
                 using (System.Drawing.Drawing2D.GraphicsPath path = Rounded(r, 6))
                 using (SolidBrush b = new SolidBrush(Color.FromArgb(238, 238, 238))) g.FillPath(b, path);
+            }
+
+            if (Conflict)
+            {
+                using (System.Drawing.Drawing2D.GraphicsPath path = Rounded(new Rectangle(1, 1, Width - 3, Height - 3), 6))
+                using (Pen pen = new Pen(Red, 2f)) g.DrawPath(pen, path);
+                using (Font fw = new Font("Segoe UI", 8f, FontStyle.Bold))
+                    TextRenderer.DrawText(g, "!", fw, new Rectangle(Width - 14, 2, 12, 14), IsToday ? Color.White : Red,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.NoPadding);
             }
 
             using (Font f = new Font("Segoe UI", 10.5f, IsToday ? FontStyle.Bold : FontStyle.Regular))
