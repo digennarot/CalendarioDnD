@@ -6,7 +6,9 @@ Programma nativo per Windows (WinForms, .NET Framework 4, già incluso in Window
 
 ## Funzioni
 
-- Accesso con qualsiasi nome; l'utente **Master** può creare, rinominare ed eliminare le campagne.
+- Accesso scegliendo il proprio nome dalla lista dei giocatori approvati.
+- I nuovi giocatori chiedono la registrazione; il **Master** la approva o la rifiuta (Gestisci → Giocatori e richieste).
+- Il Master entra con una password, scelta al primo accesso e sincronizzata su tutti i PC; può creare, rinominare ed eliminare le campagne e importare dati.
 - Più campagne, ognuna con le sue presenze.
 - Clic su un giorno → "Ci sono" / "Manco". Passando il mouse su un giorno si vedono i nomi.
 - Menu **Dati**: esporta/importa JSON (unione o sostituzione; accetta anche i dati del vecchio `Calendario.html`).
@@ -36,3 +38,11 @@ Chi non ha accesso in scrittura al repository va aggiunto come collaboratore (Se
 | `calendario_dati.json` | copia locale dei dati |
 | `calendario_impostazioni.ini` | impostazioni GitHub e ultima campagna aperta (per PC) |
 | `calendario_errore.txt` | creato solo in caso di errore |
+
+## Sicurezza: cosa sapere
+
+- **Rendi il repository privato** (Settings → General → Danger zone → Change visibility). Se è pubblico, chiunque vede nomi, presenze e l'hash della password del Master.
+- La protezione è "tra amici": chi ha un token con permesso di scrittura può modificare direttamente `dati/calendario.json` su GitHub (approvare utenti, cambiare la password del Master, cancellare dati). Dai il token solo a persone fidate; la cronologia dei commit mostra chi ha cambiato cosa.
+- I giocatori non hanno password: chiunque usi l'app può scegliere qualsiasi nome approvato.
+- **Consigliato:** tieni i dati in un repository separato (es. `CalendarioDnD-dati`, privato) e imposta quello nell'app. Così i token dei giocatori non possono modificare `Calendario.exe` o il codice in questo repository.
+- Il token GitHub è cifrato con l'account Windows (DPAPI) e non viene mai salvato in chiaro.

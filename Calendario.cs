@@ -41,13 +41,15 @@ static class Program
 // =====================================================================
 static class Json
 {
-    public static object Parse(string s) { int i = 0; object v = Value(s, ref i); Ws(s, ref i); if (i != s.Length) throw Err(i); return v; }
+    const int MaxDepth = 32;
+    public static object Parse(string s) { int i = 0; object v = Value(s, ref i, 0); Ws(s, ref i); if (i != s.Length) throw Err(i); return v; }
 
     static Exception Err(int i) { return new FormatException("JSON non valido (posizione " + i + ")"); }
     static void Ws(string s, ref int i) { while (i < s.Length && char.IsWhiteSpace(s[i])) i++; }
 
-    static object Value(string s, ref int i)
+    static object Value(string s, ref int i, int depth)
     {
+        if (depth > MaxDepth) throw new FormatException("JSON troppo annidato");
         Ws(s, ref i);
         if (i >= s.Length) throw Err(i);
         char c = s[i];
@@ -64,7 +66,7 @@ static class Json
                 Ws(s, ref i);
                 if (i >= s.Length || s[i] != ':') throw Err(i);
                 i++;
-                o[k] = Value(s, ref i);
+                o[k] = Value(s, ref i, depth + 1);
                 Ws(s, ref i);
                 if (i < s.Length && s[i] == ',') { i++; continue; }
                 if (i < s.Length && s[i] == '}') { i++; return o; }
@@ -78,7 +80,7 @@ static class Json
             if (i < s.Length && s[i] == ']') { i++; return a; }
             while (true)
             {
-                a.Add(Value(s, ref i));
+                a.Add(Value(s, ref i, depth + 1));
                 Ws(s, ref i);
                 if (i < s.Length && s[i] == ',') { i++; continue; }
                 if (i < s.Length && s[i] == ']') { i++; return a; }
@@ -113,7 +115,9 @@ static class Json
                 case 'r': sb.Append('\r'); break;
                 case 'b': sb.Append('\b'); break;
                 case 'f': sb.Append('\f'); break;
-                case 'u': sb.Append((char)Convert.ToInt32(s.Substring(i, 4), 16)); i += 4; break;
+                case 'u':
+                    if (i + 4 > s.Length) throw Err(i);
+                    sb.Append((char)Convert.ToInt32(s.Substring(i, 4), 16)); i += 4; break;
                 default: sb.Append(e); break;
             }
         }
@@ -155,11 +159,99 @@ class Store
     public const string DefaultCampaign = "Campagna principale";
     static readonly StringComparer CI = StringComparer.OrdinalIgnoreCase;
 
+    public const string Approved = "approvato", Pending = "in attesa", Rejected = "rifiutato";
+
+    // Utenti registrati: nome -> stato (approvato / in attesa / rifiutato) con ora della modifica
+    public Dictionary<string, Entry> Users = new Dictionary<string, Entry>(CI);
+    // Password del Master (hash SHA-256 con sale)
+    public string MasterHash = "", MasterSalt = "";
+    public long MasterTime = 0;
+
+    public void SetUser(string name, string status, long time)
+    {
+        Entry e;
+        if (Users.TryGetValue(name, out e) && Newer(e, status, time)) return;
+        Users.Remove(name);           // aggiorna anche le maiuscole del nome
+        Users[name] = new Entry(status, time);
+    }
+
+    public string FindUser(string name)
+    {
+        foreach (string u in Users.Keys) if (CI.Equals(u, name)) return u;
+        return null;
+    }
+
+    public string UserStatus(string name)
+    {
+        Entry e;
+        return Users.TryGetValue(name, out e) ? e.Status : null;
+    }
+
+    public List<string> UsersWithStatus(string status)
+    {
+        List<string> l = new List<string>();
+        foreach (KeyValuePair<string, Entry> kv in Users) if (kv.Value.Status == status) l.Add(kv.Key);
+        l.Sort(StringComparer.CurrentCultureIgnoreCase);
+        return l;
+    }
+
+    // Chi ha già delle presenze (dati delle versioni precedenti) è considerato approvato
+    void EnsureUsers()
+    {
+        foreach (Dictionary<string, Dictionary<string, Entry>> c in Data.Values)
+            foreach (string u in c.Keys)
+                if (!Users.ContainsKey(u) && !CI.Equals(u, "Master")) Users[u] = new Entry(Approved, 0);
+    }
+
+    public void SetMasterPassword(string pwd)
+    {
+        byte[] salt = new byte[16];
+        using (RandomNumberGenerator rng = RandomNumberGenerator.Create()) rng.GetBytes(salt);
+        MasterSalt = Convert.ToBase64String(salt);
+        MasterHash = Hash(MasterSalt, pwd);
+        MasterTime = Now();
+    }
+
+    public bool CheckMasterPassword(string pwd)
+    {
+        if (MasterHash.Length == 0) return false;
+        try
+        {
+            byte[] a = Encoding.UTF8.GetBytes(Hash(MasterSalt, pwd)), b = Encoding.UTF8.GetBytes(MasterHash);
+            int diff = a.Length ^ b.Length;   // confronto a tempo costante
+            for (int i = 0; i < Math.Min(a.Length, b.Length); i++) diff |= a[i] ^ b[i];
+            return diff == 0;
+        }
+        catch { return false; }
+    }
+
+    const int Pbkdf2Iterations = 100000;
+
+    // PBKDF2 (lento di proposito): il file dati può essere letto da altri, quindi l'hash deve resistere ai tentativi offline
+    static string Hash(string salt, string pwd)
+    {
+        using (Rfc2898DeriveBytes kdf = new Rfc2898DeriveBytes(Encoding.UTF8.GetBytes(pwd), Convert.FromBase64String(salt), Pbkdf2Iterations))
+            return "pbkdf2:" + Pbkdf2Iterations + ":" + Convert.ToBase64String(kdf.GetBytes(32));
+    }
+
     public List<string> Campaigns = new List<string>();
     public Dictionary<string, long> Created = new Dictionary<string, long>(CI);
     public Dictionary<string, long> Deleted = new Dictionary<string, long>(CI);   // campagne eliminate (per la sincronizzazione)
     public Dictionary<string, Dictionary<string, Dictionary<string, Entry>>> Data =
         new Dictionary<string, Dictionary<string, Dictionary<string, Entry>>>(CI);
+
+    // Rimuove caratteri di controllo (a capo, tab...) e limita la lunghezza dei nomi letti da file esterni
+    public static string Clean(string name)
+    {
+        if (name == null) return "";
+        StringBuilder sb = new StringBuilder();
+        foreach (char ch in name) if (!char.IsControl(ch)) sb.Append(ch);
+        string r = sb.ToString().Trim();
+        return r.Length > 60 ? r.Substring(0, 60) : r;
+    }
+
+    static bool ValidStatus(string st) { return st == "presente" || st == "assente"; }
+    static bool ValidUserStatus(string st) { return st == Approved || st == Pending || st == Rejected; }
 
     public static long Now() { return (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds; }
 
@@ -178,7 +270,7 @@ class Store
         if (!Data.ContainsKey(name)) Data[name] = new Dictionary<string, Dictionary<string, Entry>>();
     }
 
-    public void EnsureOne() { if (Campaigns.Count == 0) AddCampaign(DefaultCampaign, 0); }
+    public void EnsureOne() { if (Campaigns.Count == 0) AddCampaign(DefaultCampaign, 0); EnsureUsers(); }
 
     public Dictionary<string, Dictionary<string, Entry>> Get(string campaign)
     {
@@ -233,6 +325,10 @@ class Store
     // L'ordine delle campagne dell'altro archivio ha la precedenza (così più PC convergono).
     public void Merge(Store other)
     {
+        foreach (KeyValuePair<string, Entry> u in other.Users) SetUser(u.Key, u.Value.Status, u.Value.Time);
+        if (other.MasterTime > MasterTime || (other.MasterTime == MasterTime && string.CompareOrdinal(other.MasterHash, MasterHash) > 0))
+        { MasterHash = other.MasterHash; MasterSalt = other.MasterSalt; MasterTime = other.MasterTime; }
+
         foreach (KeyValuePair<string, long> kv in other.Deleted)
         {
             long t;
@@ -309,7 +405,17 @@ class Store
             }
             sb.Append(firstU ? "}" : "\n    }");
         }
-        sb.Append(Campaigns.Count > 0 ? "\n  }\n}\n" : "}\n}\n");
+        sb.Append(Campaigns.Count > 0 ? "\n  },\n" : "},\n");
+
+        sb.Append("  \"utenti\": {");
+        List<string> uk = new List<string>(Users.Keys); uk.Sort(StringComparer.Ordinal);
+        for (int i = 0; i < uk.Count; i++)
+            sb.Append(i == 0 ? "\n" : ",\n").Append("    ").Append(Json.Quote(uk[i]))
+              .Append(": { \"stato\": ").Append(Json.Quote(Users[uk[i]].Status)).Append(", \"t\": ").Append(Users[uk[i]].Time).Append(" }");
+        sb.Append(uk.Count > 0 ? "\n  },\n" : "},\n");
+
+        sb.Append("  \"master\": { \"hash\": ").Append(Json.Quote(MasterHash)).Append(", \"sale\": ").Append(Json.Quote(MasterSalt))
+          .Append(", \"t\": ").Append(MasterTime).Append(" }\n}\n");
         return sb.ToString();
     }
 
@@ -323,7 +429,7 @@ class Store
             // Formato del vecchio Calendario.html: { "Marco": { "2026-11-12": "presente" } }
             foreach (KeyValuePair<string, object> u in root)
                 foreach (KeyValuePair<string, object> d in Json.Obj(u.Value))
-                    if (d.Value is string) s.Set(legacyCampaign, u.Key, d.Key, (string)d.Value, 0);
+                    if (ValidStatus(d.Value as string) && Clean(u.Key).Length > 0) s.Set(legacyCampaign, Clean(u.Key), d.Key, (string)d.Value, 0);
             s.EnsureOne();
             return s;
         }
@@ -332,20 +438,38 @@ class Store
             foreach (object o in camps)
             {
                 Dictionary<string, object> c = Json.Obj(o);
-                if (c.ContainsKey("nome") && c["nome"] is string)
-                    s.AddCampaign((string)c["nome"], c.ContainsKey("creata") ? Json.Num(c["creata"]) : 0);
+                string nome = c.ContainsKey("nome") ? Clean(c["nome"] as string) : "";
+                if (nome.Length > 0) s.AddCampaign(nome, c.ContainsKey("creata") ? Json.Num(c["creata"]) : 0);
             }
         if (root.ContainsKey("eliminate"))
-            foreach (KeyValuePair<string, object> kv in Json.Obj(root["eliminate"])) s.Deleted[kv.Key] = Json.Num(kv.Value);
+            foreach (KeyValuePair<string, object> kv in Json.Obj(root["eliminate"])) if (Clean(kv.Key).Length > 0) s.Deleted[Clean(kv.Key)] = Json.Num(kv.Value);
         if (root.ContainsKey("presenze"))
             foreach (KeyValuePair<string, object> c in Json.Obj(root["presenze"]))
                 foreach (KeyValuePair<string, object> u in Json.Obj(c.Value))
                     foreach (KeyValuePair<string, object> d in Json.Obj(u.Value))
                     {
                         Dictionary<string, object> e = Json.Obj(d.Value);
-                        if (e.ContainsKey("stato") && e["stato"] is string)
-                            s.Set(c.Key, u.Key, d.Key, (string)e["stato"], e.ContainsKey("t") ? Json.Num(e["t"]) : 0);
+                        string st = e.ContainsKey("stato") ? e["stato"] as string : null;
+                        DateTime dt;
+                        if (ValidStatus(st) && Clean(c.Key).Length > 0 && Clean(u.Key).Length > 0 &&
+                            DateTime.TryParseExact(d.Key, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out dt))
+                            s.Set(Clean(c.Key), Clean(u.Key), d.Key, st, e.ContainsKey("t") ? Json.Num(e["t"]) : 0);
                     }
+        if (root.ContainsKey("utenti"))
+            foreach (KeyValuePair<string, object> u in Json.Obj(root["utenti"]))
+            {
+                Dictionary<string, object> e = Json.Obj(u.Value);
+                string st = e.ContainsKey("stato") ? e["stato"] as string : null;
+                if (ValidUserStatus(st) && Clean(u.Key).Length > 0)
+                    s.SetUser(Clean(u.Key), st, e.ContainsKey("t") ? Json.Num(e["t"]) : 0);
+            }
+        if (root.ContainsKey("master"))
+        {
+            Dictionary<string, object> m = Json.Obj(root["master"]);
+            s.MasterHash = m.ContainsKey("hash") ? (m["hash"] as string ?? "") : "";
+            s.MasterSalt = m.ContainsKey("sale") ? (m["sale"] as string ?? "") : "";
+            s.MasterTime = m.ContainsKey("t") ? Json.Num(m["t"]) : 0;
+        }
         s.EnsureOne();
         return s;
     }
@@ -376,12 +500,26 @@ class Settings
     public string FilePath = "dati/calendario.json";
     public string Token = "";
     public bool AutoSync = true;
+    public bool TokenSaved;
     public Dictionary<string, string> LastCampaign = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     readonly string file;
 
     public Settings(string file) { this.file = file; Load(); }
 
-    public bool GitHubConfigured { get { return Repo.Trim().Length > 0 && Token.Length > 0 && Repo.Contains("/"); } }
+    public bool GitHubConfigured { get { return Token.Length > 0 && Validate() == null; } }
+
+    // Restituisce un messaggio di errore, o null se repository/branch/percorso sono validi
+    public string Validate()
+    {
+        if (!System.Text.RegularExpressions.Regex.IsMatch(Repo.Trim(), @"^[A-Za-z0-9-]{1,39}/[A-Za-z0-9._-]{1,100}$"))
+            return "Repository non valido: usa il formato proprietario/nome.";
+        if (Branch.Trim().Length > 0 && !System.Text.RegularExpressions.Regex.IsMatch(Branch.Trim(), @"^[A-Za-z0-9._/-]{1,100}$"))
+            return "Nome del branch non valido.";
+        string p = FilePath.Trim().Trim('/');
+        if (!System.Text.RegularExpressions.Regex.IsMatch(p, @"^[A-Za-z0-9._ /-]{1,200}$") || ("/" + p + "/").Contains("/../") || ("/" + p + "/").Contains("/./"))
+            return "Percorso del file non valido.";
+        return null;
+    }
 
     void Load()
     {
@@ -405,17 +543,22 @@ class Settings
         List<string> l = new List<string>();
         l.Add("repo=" + Repo); l.Add("branch=" + Branch); l.Add("file=" + FilePath);
         l.Add("auto=" + (AutoSync ? "1" : "0"));
-        l.Add("token=" + Protect(Token));
-        foreach (KeyValuePair<string, string> kv in LastCampaign) l.Add("last." + kv.Key + "=" + kv.Value);
+        string prot = Protect(Token);
+        TokenSaved = prot.Length > 0;
+        l.Add("token=" + prot);
+        foreach (KeyValuePair<string, string> kv in LastCampaign)
+            if (SafeIni(kv.Key) && kv.Key.IndexOf('=') < 0 && SafeIni(kv.Value)) l.Add("last." + kv.Key + "=" + kv.Value);
         try { File.WriteAllLines(file, l.ToArray(), Encoding.UTF8); } catch { }
     }
+
+    static bool SafeIni(string v) { foreach (char c in v) if (char.IsControl(c)) return false; return true; }
 
     // Il token viene cifrato con l'account Windows (DPAPI): il file copiato su un altro PC non lo rivela.
     static string Protect(string s)
     {
         if (s.Length == 0) return "";
         try { return "dpapi:" + Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(s), null, DataProtectionScope.CurrentUser)); }
-        catch { return "plain:" + s; }
+        catch { return ""; } // meglio non salvarlo che salvarlo in chiaro
     }
 
     static string Unprotect(string s)
@@ -423,7 +566,6 @@ class Settings
         try
         {
             if (s.StartsWith("dpapi:")) return Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(s.Substring(6)), null, DataProtectionScope.CurrentUser));
-            if (s.StartsWith("plain:")) return s.Substring(6);
         }
         catch { }
         return "";
@@ -542,10 +684,12 @@ class MainForm : Form
 
     Panel loginPanel, calendarPanel;
     TextBox usernameBox;
-    Label errorLabel, userLabel, monthLabel, statusLabel;
+    Label errorLabel, userLabel, monthLabel, statusLabel, loginStatus;
+    ListBox userList;
     ComboBox campaignBox;
     Button manageBtn, dataBtn;
     ContextMenuStrip statusMenu, manageMenu, dataMenu;
+    ToolStripMenuItem importMerge, importReplace;
     DayCell[] cells = new DayCell[42];
     string selectedDate;
     bool fillingCombo;
@@ -577,6 +721,12 @@ class MainForm : Form
         BuildCalendar();
         BuildMenus();
         UpdateUI();
+        Shown += delegate
+        {
+            if (settings.AutoSync && settings.GitHubConfigured) Sync(false);
+            else SetStatus("Dati salvati solo su questo PC (sincronizzazione GitHub non configurata)");
+            FillUserList();
+        };
     }
 
     // ---------- Persistenza locale ----------
@@ -609,25 +759,48 @@ class MainForm : Form
         loginPanel = new Panel { Dock = DockStyle.Fill };
 
         Label title = new Label { Text = "Accesso al Calendario", Font = new Font("Segoe UI", 16f, FontStyle.Bold),
-            AutoSize = false, TextAlign = ContentAlignment.MiddleCenter, Bounds = new Rectangle(20, 90, 380, 40) };
-        Label prompt = new Label { Text = "Inserisci il tuo nome:", AutoSize = false,
-            TextAlign = ContentAlignment.MiddleCenter, Bounds = new Rectangle(20, 140, 380, 25) };
-        usernameBox = new TextBox { Bounds = new Rectangle(85, 175, 250, 28) };
-        usernameBox.KeyDown += delegate(object s, KeyEventArgs e)
+            AutoSize = false, TextAlign = ContentAlignment.MiddleCenter, Bounds = new Rectangle(20, 18, 380, 40) };
+
+        // --- Accesso: scelta dalla lista dei giocatori approvati ---
+        Label prompt = new Label { Text = "Chi sei?", AutoSize = false, Font = new Font("Segoe UI", 10f, FontStyle.Bold),
+            TextAlign = ContentAlignment.MiddleLeft, Bounds = new Rectangle(85, 66, 250, 24) };
+        userList = new ListBox { Bounds = new Rectangle(85, 92, 250, 190), IntegralHeight = false };
+        userList.DoubleClick += delegate { HandleLogin(); };
+        userList.KeyDown += delegate(object s, KeyEventArgs e)
         {
             if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; HandleLogin(); }
         };
-        Button loginBtn = new Button { Text = "Accedi", Bounds = new Rectangle(160, 215, 100, 34),
+        Button loginBtn = new Button { Text = "Entra", Bounds = new Rectangle(160, 290, 100, 34),
             BackColor = Blue, ForeColor = Color.White, FlatStyle = FlatStyle.Flat };
         loginBtn.FlatAppearance.BorderSize = 0;
         loginBtn.Click += delegate { HandleLogin(); };
-        errorLabel = new Label { ForeColor = Color.Red, AutoSize = false, TextAlign = ContentAlignment.MiddleCenter,
-            Bounds = new Rectangle(20, 260, 380, 25) };
-        Label hint = new Label { Text = "Puoi entrare con qualsiasi nome.\nIl Master può creare e gestire le campagne.",
-            ForeColor = Color.Gray, Font = new Font("Segoe UI", 8.5f), AutoSize = false,
-            TextAlign = ContentAlignment.MiddleCenter, Bounds = new Rectangle(20, 295, 380, 45) };
 
-        loginPanel.Controls.AddRange(new Control[] { title, prompt, usernameBox, loginBtn, errorLabel, hint });
+        // --- Registrazione: richiesta da approvare dal Master ---
+        Label sep = new Label { BorderStyle = BorderStyle.Fixed3D, Bounds = new Rectangle(40, 338, 340, 2) };
+        Label regLabel = new Label { Text = "Nuovo giocatore? Chiedi al Master di approvarti:", AutoSize = false,
+            Font = new Font("Segoe UI", 9f), ForeColor = Color.DimGray, Bounds = new Rectangle(40, 346, 340, 22) };
+        usernameBox = new TextBox { Bounds = new Rectangle(40, 372, 230, 28) };
+        usernameBox.KeyDown += delegate(object s, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; HandleRegister(); }
+        };
+        Button regBtn = new Button { Text = "Registrati", Bounds = new Rectangle(276, 370, 104, 30),
+            FlatStyle = FlatStyle.Flat, ForeColor = Blue, BackColor = Color.White };
+        regBtn.FlatAppearance.BorderColor = Blue;
+        regBtn.Click += delegate { HandleRegister(); };
+
+        errorLabel = new Label { ForeColor = Color.Red, AutoSize = false, TextAlign = ContentAlignment.MiddleCenter,
+            Bounds = new Rectangle(20, 408, 380, 44) };
+
+        LinkLabel refresh = new LinkLabel { Text = "Aggiorna da GitHub", AutoSize = true, Location = new Point(40, 470) };
+        refresh.LinkClicked += delegate { Sync(true); FillUserList(); };
+        LinkLabel ghSettings = new LinkLabel { Text = "Impostazioni GitHub", AutoSize = true, Location = new Point(240, 470) };
+        ghSettings.LinkClicked += delegate { GitHubSettingsDialog(); FillUserList(); };
+        loginStatus = new Label { AutoSize = false, Bounds = new Rectangle(20, 496, 380, 22), ForeColor = Color.Gray,
+            Font = new Font("Segoe UI", 8.5f), TextAlign = ContentAlignment.MiddleCenter, AutoEllipsis = true };
+
+        loginPanel.Controls.AddRange(new Control[] { title, prompt, userList, loginBtn, sep, regLabel, usernameBox, regBtn,
+            errorLabel, refresh, ghSettings, loginStatus });
         Controls.Add(loginPanel);
     }
 
@@ -648,9 +821,9 @@ class MainForm : Form
 
         Label campLabel = new Label { Text = "Campagna:", AutoSize = false, Bounds = new Rectangle(15, 50, 78, 28),
             TextAlign = ContentAlignment.MiddleLeft, ForeColor = Color.DimGray };
-        campaignBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Bounds = new Rectangle(93, 50, 212, 28) };
+        campaignBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Bounds = new Rectangle(93, 50, 190, 28) };
         campaignBox.SelectedIndexChanged += delegate { OnCampaignChanged(); };
-        manageBtn = new Button { Text = "Gestisci ▾", Bounds = new Rectangle(312, 49, 93, 30),
+        manageBtn = new Button { Text = "Gestisci ▾", Bounds = new Rectangle(290, 49, 115, 30),
             FlatStyle = FlatStyle.Flat, ForeColor = Blue, BackColor = Color.White };
         manageBtn.FlatAppearance.BorderColor = Blue;
         manageBtn.Click += delegate { manageMenu.Show(manageBtn, new Point(0, manageBtn.Height)); };
@@ -707,6 +880,9 @@ class MainForm : Form
         statusMenu.Items.Add(absent);
 
         manageMenu = new ContextMenuStrip { ShowImageMargin = false, Font = new Font("Segoe UI", 10f) };
+        manageMenu.Items.Add("Giocatori e richieste...", null, delegate { UsersDialog(); });
+        manageMenu.Items.Add("Cambia password del Master...", null, delegate { ChangeMasterPassword(); });
+        manageMenu.Items.Add(new ToolStripSeparator());
         manageMenu.Items.Add("Nuova campagna...", null, delegate { NewCampaign(); });
         manageMenu.Items.Add("Rinomina campagna...", null, delegate { RenameCampaign(); });
         manageMenu.Items.Add(new ToolStripSeparator());
@@ -719,8 +895,13 @@ class MainForm : Form
         dataMenu.Items.Add("Impostazioni GitHub...", null, delegate { GitHubSettingsDialog(); });
         dataMenu.Items.Add(new ToolStripSeparator());
         dataMenu.Items.Add("Esporta in JSON...", null, delegate { ExportJson(); });
-        dataMenu.Items.Add("Importa JSON (unisci)...", null, delegate { ImportJson(false); });
-        dataMenu.Items.Add("Importa JSON (sostituisci tutto)...", null, delegate { ImportJson(true); });
+        importMerge = new ToolStripMenuItem("Importa JSON (unisci)... [Master]");
+        importMerge.Click += delegate { ImportJson(false); };
+        importReplace = new ToolStripMenuItem("Importa JSON (sostituisci tutto)... [Master]");
+        importReplace.Click += delegate { ImportJson(true); };
+        dataMenu.Items.Add(importMerge);
+        dataMenu.Items.Add(importReplace);
+        dataMenu.Opening += delegate { importMerge.Visible = importReplace.Visible = IsMaster; };
     }
 
     // ---------- Campagne ----------
@@ -796,7 +977,9 @@ class MainForm : Form
         AfterChange("Campagna eliminata: " + name);
     }
 
-    static string InputBox(string title, string prompt, string initial)
+    static string InputBox(string title, string prompt, string initial) { return InputBox(title, prompt, initial, false); }
+
+    static string InputBox(string title, string prompt, string initial, bool password)
     {
         using (Form f = new Form())
         {
@@ -807,7 +990,7 @@ class MainForm : Form
             f.StartPosition = FormStartPosition.CenterParent;
             f.ClientSize = new Size(320, 125);
             Label l = new Label { Text = prompt, Bounds = new Rectangle(12, 10, 296, 22) };
-            TextBox t = new TextBox { Text = initial, Bounds = new Rectangle(12, 36, 296, 28) };
+            TextBox t = new TextBox { Text = initial, Bounds = new Rectangle(12, 36, 296, 28), UseSystemPasswordChar = password };
             Button ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Bounds = new Rectangle(132, 80, 85, 32) };
             Button cancel = new Button { Text = "Annulla", DialogResult = DialogResult.Cancel, Bounds = new Rectangle(223, 80, 85, 32) };
             f.Controls.AddRange(new Control[] { l, t, ok, cancel });
@@ -828,6 +1011,8 @@ class MainForm : Form
     {
         currentCampaign = store.Find(currentCampaign) ?? store.Campaigns[0];
         FillCampaignBox();
+        UpdateManageButton();
+        FillUserList();
         RenderCalendar();
     }
 
@@ -851,6 +1036,7 @@ class MainForm : Form
 
     void ImportJson(bool replace)
     {
+        if (!IsMaster) return;
         using (OpenFileDialog d = new OpenFileDialog())
         {
             d.Filter = "File JSON (*.json)|*.json|Tutti i file|*.*";
@@ -935,7 +1121,11 @@ class MainForm : Form
         finally { Cursor = Cursors.Default; }
     }
 
-    void SetStatus(string s) { if (statusLabel != null) { statusLabel.Text = s; tip.SetToolTip(statusLabel, s); } }
+    void SetStatus(string s)
+    {
+        if (statusLabel != null) { statusLabel.Text = s; tip.SetToolTip(statusLabel, s); }
+        if (loginStatus != null) { loginStatus.Text = s; tip.SetToolTip(loginStatus, s); }
+    }
 
     void GitHubSettingsDialog()
     {
@@ -968,12 +1158,23 @@ class MainForm : Form
             f.AcceptButton = ok; f.CancelButton = cancel;
             if (f.ShowDialog(this) != DialogResult.OK) return;
 
+            string oldRepo = settings.Repo, oldBranch = settings.Branch, oldPath = settings.FilePath;
             settings.Repo = repo.Text.Trim();
             settings.Branch = branch.Text.Trim();
             settings.FilePath = path.Text.Trim().Length > 0 ? path.Text.Trim() : "calendario.json";
+            string err = settings.Validate();
+            if (err != null)
+            {
+                settings.Repo = oldRepo; settings.Branch = oldBranch; settings.FilePath = oldPath;
+                MessageBox.Show(err + "\nImpostazioni non salvate.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
             if (token.Text.Trim().Length > 0) settings.Token = token.Text.Trim();
             settings.AutoSync = auto.Checked;
             settings.Save();
+            if (settings.Token.Length > 0 && !settings.TokenSaved)
+                MessageBox.Show("Non è stato possibile cifrare il token con Windows: verrà usato solo fino alla chiusura del programma " +
+                    "e non viene salvato su disco.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             if (settings.GitHubConfigured) Sync(true);
         }
     }
@@ -1003,17 +1204,171 @@ class MainForm : Form
             loginPanel.Visible = true;
             usernameBox.Text = "";
             errorLabel.Text = "";
-            usernameBox.Focus();
+            Text = "Calendario Condiviso";
+            FillUserList();
+            userList.Focus();
         }
+    }
+
+    void FillUserList()
+    {
+        if (userList == null) return;
+        string sel = userList.SelectedItem as string;
+        userList.Items.Clear();
+        userList.Items.Add(MasterName);
+        foreach (string u in store.UsersWithStatus(Store.Approved)) userList.Items.Add(u);
+        if (sel != null && userList.Items.Contains(sel)) userList.SelectedItem = sel;
+    }
+
+    static string NormalizeName(string name)
+    {
+        name = name.Trim();
+        StringBuilder sb = new StringBuilder();
+        foreach (char ch in name) if (!char.IsControl(ch)) sb.Append(ch);
+        name = sb.ToString();
+        if (name.Length == 0) return "";
+        string norm = name.ToLowerInvariant();
+        return char.ToUpperInvariant(norm[0]) + norm.Substring(1);
+    }
+
+    void HandleRegister()
+    {
+        errorLabel.ForeColor = Color.Red;
+        string name = NormalizeName(usernameBox.Text);
+        if (name.Length == 0) { errorLabel.Text = "Scrivi il tuo nome per registrarti."; return; }
+        if (name.Length > 30) { errorLabel.Text = "Il nome è troppo lungo (massimo 30 caratteri)."; return; }
+        if (string.Equals(name, MasterName, StringComparison.OrdinalIgnoreCase)) { errorLabel.Text = "Il nome Master è riservato."; return; }
+
+        if (settings.AutoSync && settings.GitHubConfigured) Sync(false);
+        LoadData();
+        string existing = store.FindUser(name);
+        string st = existing == null ? null : store.UserStatus(existing);
+        if (st == Store.Approved) { errorLabel.Text = "Sei già registrato: scegli il tuo nome dalla lista."; FillUserList(); return; }
+        if (st == Store.Pending) { errorLabel.Text = "Richiesta già inviata: attendi l'approvazione del Master."; return; }
+
+        store.SetUser(name, Store.Pending, Store.Now());
+        SaveData();
+        if (settings.AutoSync && settings.GitHubConfigured) Sync(false, "Richiesta di registrazione: " + name);
+        errorLabel.ForeColor = Green;
+        errorLabel.Text = "Richiesta inviata! Potrai entrare quando il Master ti approva." +
+            (settings.GitHubConfigured ? "" : "\n(Senza GitHub il Master deve approvarti da questo PC.)");
+        usernameBox.Text = "";
+    }
+
+    bool AskMasterPassword()
+    {
+        if (store.MasterHash.Length == 0)
+        {
+            MessageBox.Show("Primo accesso del Master: scegli una password.\nServirà a te per entrare come Master su tutti i PC.",
+                Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+            string p1 = InputBox("Nuova password del Master", "Password (almeno 6 caratteri):", "", true);
+            if (p1 == null) return false;
+            if (p1.Length < 6) { MessageBox.Show("La password deve avere almeno 6 caratteri.", Text); return false; }
+            string p2 = InputBox("Nuova password del Master", "Ripeti la password:", "", true);
+            if (p2 == null) return false;
+            if (p1 != p2) { MessageBox.Show("Le due password non coincidono.", Text); return false; }
+            store.SetMasterPassword(p1);
+            SaveData();
+            return true;
+        }
+        string p = InputBox("Accesso Master", "Password del Master:", "", true);
+        if (p == null) return false;
+        if (store.CheckMasterPassword(p)) return true;
+        System.Threading.Thread.Sleep(1000); // rallenta i tentativi
+        MessageBox.Show("Password errata.", Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        return false;
+    }
+
+    void ChangeMasterPassword()
+    {
+        string p1 = InputBox("Cambia password del Master", "Nuova password (almeno 6 caratteri):", "", true);
+        if (p1 == null) return;
+        if (p1.Length < 6) { MessageBox.Show("La password deve avere almeno 6 caratteri.", Text); return; }
+        string p2 = InputBox("Cambia password del Master", "Ripeti la nuova password:", "", true);
+        if (p2 == null) return;
+        if (p1 != p2) { MessageBox.Show("Le due password non coincidono.", Text); return; }
+        LoadData();
+        store.SetMasterPassword(p1);
+        AfterChange("Password del Master cambiata");
+        MessageBox.Show("Password cambiata.", Text);
+    }
+
+    void UsersDialog()
+    {
+        using (Form f = new Form())
+        {
+            f.Text = "Giocatori e richieste";
+            f.Font = new Font("Segoe UI", 10f);
+            f.FormBorderStyle = FormBorderStyle.FixedDialog;
+            f.MinimizeBox = false; f.MaximizeBox = false; f.ShowInTaskbar = false;
+            f.StartPosition = FormStartPosition.CenterParent;
+            f.ClientSize = new Size(380, 430);
+
+            Label l1 = new Label { Text = "Richieste in attesa", Font = new Font("Segoe UI", 10f, FontStyle.Bold), Bounds = new Rectangle(12, 10, 356, 22) };
+            ListBox pending = new ListBox { Bounds = new Rectangle(12, 34, 240, 140), IntegralHeight = false, SelectionMode = SelectionMode.MultiExtended };
+            Button approve = new Button { Text = "Approva", Bounds = new Rectangle(260, 34, 108, 32), ForeColor = Green };
+            Button reject = new Button { Text = "Rifiuta", Bounds = new Rectangle(260, 72, 108, 32), ForeColor = Red };
+            Label l2 = new Label { Text = "Giocatori approvati", Font = new Font("Segoe UI", 10f, FontStyle.Bold), Bounds = new Rectangle(12, 186, 356, 22) };
+            ListBox approved = new ListBox { Bounds = new Rectangle(12, 210, 240, 170), IntegralHeight = false, SelectionMode = SelectionMode.MultiExtended };
+            Button remove = new Button { Text = "Rimuovi", Bounds = new Rectangle(260, 210, 108, 32), ForeColor = Red };
+            Button close = new Button { Text = "Chiudi", DialogResult = DialogResult.Cancel, Bounds = new Rectangle(283, 390, 85, 32) };
+
+            Action fill = delegate
+            {
+                pending.Items.Clear(); approved.Items.Clear();
+                foreach (string u in store.UsersWithStatus(Store.Pending)) pending.Items.Add(u);
+                foreach (string u in store.UsersWithStatus(Store.Approved)) approved.Items.Add(u);
+            };
+            Action<ListBox, string, string> apply = delegate(ListBox box, string status, string what)
+            {
+                if (box.SelectedItems.Count == 0) return;
+                List<string> names = new List<string>();
+                foreach (object o in box.SelectedItems) names.Add((string)o);
+                if (status == Store.Rejected && MessageBox.Show(what + ": " + string.Join(", ", names.ToArray()) + "?", Text,
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                LoadData();
+                long now = Store.Now();
+                foreach (string n in names) store.SetUser(n, status, now);
+                AfterChange(what + ": " + string.Join(", ", names.ToArray()));
+                fill();
+            };
+            approve.Click += delegate { apply(pending, Store.Approved, "Approvati"); };
+            reject.Click += delegate { apply(pending, Store.Rejected, "Rifiutati"); };
+            remove.Click += delegate { apply(approved, Store.Rejected, "Rimossi"); };
+
+            f.Controls.AddRange(new Control[] { l1, pending, approve, reject, l2, approved, remove, close });
+            f.CancelButton = close;
+            fill();
+            f.ShowDialog(this);
+        }
+        UpdateManageButton();
+    }
+
+    void UpdateManageButton()
+    {
+        int n = store.UsersWithStatus(Store.Pending).Count;
+        manageBtn.Text = n > 0 ? "Gestisci (" + n + ") ▾" : "Gestisci ▾";
+        manageBtn.ForeColor = n > 0 ? Red : Blue;
+        manageBtn.FlatAppearance.BorderColor = manageBtn.ForeColor;
     }
 
     void HandleLogin()
     {
-        string name = usernameBox.Text.Trim();
-        if (name.Length == 0) { errorLabel.Text = "Per favore, inserisci il tuo nome."; return; }
-        string norm = name.ToLowerInvariant();
-        loggedInUser = char.ToUpperInvariant(norm[0]) + norm.Substring(1);
+        errorLabel.ForeColor = Color.Red;
+        string name = userList.SelectedItem as string;
+        if (name == null) { errorLabel.Text = "Scegli il tuo nome dalla lista (o registrati qui sotto)."; return; }
         LoadData();
+        if (name == MasterName)
+        {
+            if (!AskMasterPassword()) return;
+        }
+        else if (store.UserStatus(name) != Store.Approved)
+        {
+            errorLabel.Text = "Questo giocatore non è più approvato.";
+            FillUserList();
+            return;
+        }
+        loggedInUser = name;
         string last;
         if (settings.LastCampaign.TryGetValue(loggedInUser, out last) && store.Find(last) != null) currentCampaign = store.Find(last);
         UpdateUI();
