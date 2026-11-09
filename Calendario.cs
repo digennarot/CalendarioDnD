@@ -306,7 +306,6 @@ class Store
         foreach (string d in MasterConflicts().Keys) if (string.CompareOrdinal(d, today) >= 0) n++;
         return n;
     }
-
     public void EnsureOne() { if (Campaigns.Count == 0) AddCampaign(DefaultCampaign, 0); EnsureUsers(); }
 
     public Dictionary<string, Dictionary<string, Entry>> Get(string campaign)
